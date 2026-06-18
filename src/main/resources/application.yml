@@ -65,3 +65,8 @@ logging:
     root: INFO
     com.example.smartkb: INFO
 
+kb:
+  jwt:
+    secret: ${JWT_SECRET}
+    access-token-ttl: 15m
+    refresh-token-ttl: 7d
