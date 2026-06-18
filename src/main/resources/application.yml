@@ -75,3 +75,16 @@ kb:
     access-key: ${MINIO_ACCESS_KEY}
     secret-key: ${MINIO_SECRET_KEY}
     bucket: ${MINIO_DOCUMENT_BUCKET:documents}
+  llm:
+    providers:
+      deepseek:
+        base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+        api-key: ${DEEPSEEK_API_KEY}
+        chat-model: ${DEEPSEEK_CHAT_MODEL:deepseek-chat}
+        priority: 1
+      qwen:
+        base-url: ${QWEN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+        api-key: ${QWEN_API_KEY}
+        chat-model: ${QWEN_CHAT_MODEL:qwen-plus}
+        embedding-model: ${QWEN_EMBEDDING_MODEL:text-embedding-v3}
+        priority: 2
