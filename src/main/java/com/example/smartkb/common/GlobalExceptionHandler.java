@@ -1,5 +1,6 @@
 package com.example.smartkb.common;
 
+import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -40,6 +41,16 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(Result.failure(40000, message));
     }
 
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<Result<Void>> handleConstraintViolationException(
+            ConstraintViolationException exception) {
+        String message = exception.getConstraintViolations().stream()
+                .map(violation -> violation.getMessage())
+                .distinct()
+                .collect(Collectors.joining("; "));
+        return ResponseEntity.badRequest().body(Result.failure(40000, message));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Result<Void>> handleException(Exception exception) {
         log.error("Unhandled exception", exception);
@@ -47,4 +58,3 @@ public class GlobalExceptionHandler {
                 .body(Result.failure(50000, "服务器内部错误"));
     }
 }
-
