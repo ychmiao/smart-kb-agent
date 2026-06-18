@@ -5,6 +5,8 @@ import com.example.smartkb.common.BusinessException;
 import com.example.smartkb.common.UserContext;
 import com.example.smartkb.document.entity.Document;
 import com.example.smartkb.document.mapper.DocumentMapper;
+import com.example.smartkb.document.model.DocumentStatus;
+import com.example.smartkb.document.service.DocumentProcessingService;
 import com.example.smartkb.document.service.DocumentService;
 import com.example.smartkb.document.storage.MinioFileStorage;
 import com.example.smartkb.document.vo.DocumentResponse;
@@ -24,7 +26,6 @@ import java.util.UUID;
 public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> implements DocumentService {
 
     private static final long MAX_FILE_SIZE = 50L * 1024 * 1024;
-    private static final int STATUS_PROCESSING = 0;
     private static final int INITIAL_CHUNK_COUNT = 0;
     private static final Set<String> ALLOWED_FILE_TYPES = Set.of("pdf", "docx", "md", "txt");
     private static final Map<String, Set<String>> ALLOWED_CONTENT_TYPES = Map.of(
@@ -39,10 +40,13 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
 
     private final KnowledgeBaseService knowledgeBaseService;
     private final MinioFileStorage minioFileStorage;
+    private final DocumentProcessingService documentProcessingService;
 
-    public DocumentServiceImpl(KnowledgeBaseService knowledgeBaseService, MinioFileStorage minioFileStorage) {
+    public DocumentServiceImpl(KnowledgeBaseService knowledgeBaseService, MinioFileStorage minioFileStorage,
+                               DocumentProcessingService documentProcessingService) {
         this.knowledgeBaseService = knowledgeBaseService;
         this.minioFileStorage = minioFileStorage;
+        this.documentProcessingService = documentProcessingService;
     }
 
     @Override
@@ -61,16 +65,25 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             document.setFileSize(file.getSize());
             document.setMinioPath(objectName);
             document.setChunkCount(INITIAL_CHUNK_COUNT);
-            document.setStatus(STATUS_PROCESSING);
+            document.setStatus(DocumentStatus.PROCESSING.getCode());
             if (!save(document)) {
                 throw new BusinessException(50011, "文档记录创建失败");
             }
             log.info("Document uploaded: documentId={}, kbId={}, userId={}, objectName={}",
                     document.getId(), knowledgeBaseId, userId, objectName);
+            submitProcessingTask(document.getId());
             return document.getId();
         } catch (RuntimeException exception) {
             minioFileStorage.removeQuietly(objectName);
             throw exception;
+        }
+    }
+
+    private void submitProcessingTask(Long documentId) {
+        try {
+            documentProcessingService.process(documentId);
+        } catch (RuntimeException exception) {
+            documentProcessingService.markSubmissionFailed(documentId, exception);
         }
     }
 
@@ -153,4 +166,3 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     private record ValidatedFile(String fileName, String fileType) {
     }
 }
-

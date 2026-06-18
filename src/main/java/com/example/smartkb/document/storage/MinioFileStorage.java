@@ -3,6 +3,8 @@ package com.example.smartkb.document.storage;
 import com.example.smartkb.common.BusinessException;
 import com.example.smartkb.config.MinioProperties;
 import io.minio.BucketExistsArgs;
+import io.minio.GetObjectArgs;
+import io.minio.GetObjectResponse;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
@@ -53,6 +55,19 @@ public class MinioFileStorage {
         }
     }
 
+    public InputStream download(String objectName) {
+        try {
+            GetObjectResponse response = minioClient.getObject(GetObjectArgs.builder()
+                    .bucket(properties.getBucket())
+                    .object(objectName)
+                    .build());
+            return response;
+        } catch (Exception exception) {
+            log.error("Failed to download file from MinIO: objectName={}", objectName, exception);
+            throw new BusinessException(50012, "读取文档文件失败", exception);
+        }
+    }
+
     private void ensureBucketExists() throws Exception {
         boolean exists = minioClient.bucketExists(BucketExistsArgs.builder()
                 .bucket(properties.getBucket())
@@ -64,4 +79,3 @@ public class MinioFileStorage {
         }
     }
 }
-
