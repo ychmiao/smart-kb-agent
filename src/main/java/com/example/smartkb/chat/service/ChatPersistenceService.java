@@ -33,7 +33,8 @@ public class ChatPersistenceService {
 
     @Async("chatPersistenceTaskExecutor")
     public void persistExchange(Long conversationId, String question, String answer,
-                                String rewrittenQuery, List<SourceReference> sources) {
+                                String rewrittenQuery, boolean needRetrieval,
+                                List<SourceReference> sources) {
         try {
             String sourceJson = objectMapper.writeValueAsString(sources);
             transactionTemplate.executeWithoutResult(status -> {
@@ -43,7 +44,7 @@ public class ChatPersistenceService {
                         question,
                         null,
                         rewrittenQuery,
-                        1
+                        needRetrieval ? 1 : 0
                 );
                 ChatMessage assistantMessage = createMessage(
                         conversationId,
@@ -51,7 +52,7 @@ public class ChatPersistenceService {
                         answer,
                         sourceJson,
                         rewrittenQuery,
-                        1
+                        needRetrieval ? 1 : 0
                 );
                 if (chatMessageMapper.insert(userMessage) != 1
                         || chatMessageMapper.insert(assistantMessage) != 1) {
@@ -76,4 +77,3 @@ public class ChatPersistenceService {
         return message;
     }
 }
-

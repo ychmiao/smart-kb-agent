@@ -15,6 +15,8 @@ import com.example.smartkb.chat.service.ConversationService;
 import com.example.smartkb.common.UserContext;
 import com.example.smartkb.llm.service.LlmGatewayService;
 import com.example.smartkb.search.service.RetrievalService;
+import com.example.smartkb.search.model.QueryRewriteResult;
+import com.example.smartkb.search.service.QueryRewriteService;
 import com.example.smartkb.search.vo.RetrievedChunk;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -36,6 +38,7 @@ public class ChatServiceImpl implements ChatService {
 
     private final ConversationService conversationService;
     private final ChatHistoryService chatHistoryService;
+    private final QueryRewriteService queryRewriteService;
     private final RetrievalService retrievalService;
     private final LlmGatewayService llmGatewayService;
     private final ChatPersistenceService chatPersistenceService;
@@ -43,12 +46,14 @@ public class ChatServiceImpl implements ChatService {
 
     public ChatServiceImpl(ConversationService conversationService,
                            ChatHistoryService chatHistoryService,
+                           QueryRewriteService queryRewriteService,
                            RetrievalService retrievalService,
                            LlmGatewayService llmGatewayService,
                            ChatPersistenceService chatPersistenceService,
                            ObjectMapper objectMapper) {
         this.conversationService = conversationService;
         this.chatHistoryService = chatHistoryService;
+        this.queryRewriteService = queryRewriteService;
         this.retrievalService = retrievalService;
         this.llmGatewayService = llmGatewayService;
         this.chatPersistenceService = chatPersistenceService;
@@ -66,20 +71,57 @@ public class ChatServiceImpl implements ChatService {
                 question
         );
         List<ChatHistoryMessage> history = chatHistoryService.getRecentHistory(conversation.getId());
-        ServerSentEvent<String> rewriteEvent = sse(new RewriteSseEvent(question));
-
-        Flux<ServerSentEvent<String>> answerStream = Mono.fromCallable(
-                        () -> retrievalService.retrieve(request.getKbId(), question, RETRIEVAL_TOP_K)
-                )
+        return Mono.fromCallable(() -> queryRewriteService.rewrite(question, history))
                 .subscribeOn(Schedulers.boundedElastic())
-                .flatMapMany(chunks -> streamAnswer(conversation, question, history, chunks));
-        return Flux.concat(Flux.just(rewriteEvent), answerStream);
+                .flatMapMany(rewriteResult -> Flux.concat(
+                        Flux.just(sse(new RewriteSseEvent(
+                                rewriteResult.getNeedRetrieval(),
+                                rewriteResult.getRewrittenQuery()
+                        ))),
+                        routeAnswer(
+                                conversation,
+                                request.getKbId(),
+                                question,
+                                history,
+                                rewriteResult
+                        )
+                ));
+    }
+
+    private Flux<ServerSentEvent<String>> routeAnswer(Conversation conversation, Long kbId,
+                                                       String question, List<ChatHistoryMessage> history,
+                                                       QueryRewriteResult rewriteResult) {
+        if (!rewriteResult.getNeedRetrieval()) {
+            return streamAnswer(
+                    conversation,
+                    question,
+                    history,
+                    List.of(),
+                    rewriteResult
+            );
+        }
+        return Mono.fromCallable(() -> retrievalService.retrieve(
+                        kbId,
+                        rewriteResult.getRewrittenQuery(),
+                        RETRIEVAL_TOP_K
+                ))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(chunks -> streamAnswer(
+                        conversation,
+                        question,
+                        history,
+                        chunks,
+                        rewriteResult
+                ));
     }
 
     private Flux<ServerSentEvent<String>> streamAnswer(Conversation conversation, String question,
                                                         List<ChatHistoryMessage> history,
-                                                        List<RetrievedChunk> chunks) {
-        String prompt = buildRagPrompt(question, history, chunks);
+                                                        List<RetrievedChunk> chunks,
+                                                        QueryRewriteResult rewriteResult) {
+        String prompt = rewriteResult.getNeedRetrieval()
+                ? buildRagPrompt(question, history, chunks)
+                : buildChatPrompt(question, history);
         String requestId = "chat-" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
         StringBuilder answer = new StringBuilder();
         List<SourceReference> sources = chunks.stream()
@@ -94,7 +136,13 @@ public class ChatServiceImpl implements ChatService {
                 .doOnNext(answer::append)
                 .map(token -> sse(new TokenSseEvent(token)));
         Flux<ServerSentEvent<String>> terminalEvents = Flux.defer(() -> {
-            submitPersistence(conversation.getId(), question, answer.toString(), sources);
+            submitPersistence(
+                    conversation.getId(),
+                    question,
+                    answer.toString(),
+                    rewriteResult,
+                    sources
+            );
             return Flux.just(
                     sse(new SourcesSseEvent(sources)),
                     sse(new DoneSseEvent())
@@ -104,19 +152,40 @@ public class ChatServiceImpl implements ChatService {
     }
 
     private void submitPersistence(Long conversationId, String question, String answer,
+                                   QueryRewriteResult rewriteResult,
                                    List<SourceReference> sources) {
         try {
             chatPersistenceService.persistExchange(
                     conversationId,
                     question,
                     answer,
-                    question,
+                    rewriteResult.getRewrittenQuery(),
+                    rewriteResult.getNeedRetrieval(),
                     sources
             );
         } catch (RuntimeException exception) {
             log.error("Failed to submit chat persistence task: conversationId={}",
                     conversationId, exception);
         }
+    }
+
+    private String buildChatPrompt(String question, List<ChatHistoryMessage> history) {
+        StringBuilder historyText = new StringBuilder();
+        for (ChatHistoryMessage message : history) {
+            historyText.append(message.role())
+                    .append("：")
+                    .append(message.content())
+                    .append('\n');
+        }
+        return """
+                你是一个友好的智能助手。
+                当前问题不需要查询知识库，请直接自然地回答用户。
+
+                历史对话：
+                %s
+                用户问题：
+                %s
+                """.formatted(historyText, question);
     }
 
     private String buildRagPrompt(String question, List<ChatHistoryMessage> history,
