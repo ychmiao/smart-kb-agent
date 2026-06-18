@@ -5,6 +5,7 @@ import com.example.smartkb.llm.client.OpenAiCompatibleClient;
 import com.example.smartkb.llm.config.LlmProperties;
 import com.example.smartkb.llm.exception.AllLlmProviderFailedException;
 import com.example.smartkb.llm.service.impl.LlmGatewayServiceImpl;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,6 +17,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -33,6 +35,7 @@ class LlmGatewayServiceImplTest {
     private LlmProperties.Provider deepSeek;
     private LlmProperties.Provider qwen;
     private LlmGatewayService gatewayService;
+    private CircuitBreakerRegistry circuitBreakerRegistry;
 
     @BeforeEach
     void setUp() {
@@ -45,7 +48,13 @@ class LlmGatewayServiceImplTest {
         LlmProperties properties = new LlmProperties();
         properties.setProviders(providers);
 
-        gatewayService = new LlmGatewayServiceImpl(client, properties, callLogService);
+        circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults();
+        gatewayService = new LlmGatewayServiceImpl(
+                client,
+                properties,
+                callLogService,
+                circuitBreakerRegistry
+        );
     }
 
     @Test
@@ -89,6 +98,26 @@ class LlmGatewayServiceImplTest {
         assertThatThrownBy(() -> gatewayService.chat("request-3", "question"))
                 .isInstanceOf(AllLlmProviderFailedException.class)
                 .hasMessage("AI 服务暂时不可用，请稍后再试");
+    }
+
+    @Test
+    void shouldSkipDeepSeekWhenCircuitBreakerIsOpen() {
+        circuitBreakerRegistry.circuitBreaker("deepseek").transitionToOpenState();
+        when(client.chat("qwen", qwen, "question")).thenReturn("qwen answer");
+
+        String answer = gatewayService.chat("request-4", "question");
+
+        assertThat(answer).isEqualTo("qwen answer");
+        verify(client, never()).chat("deepseek", deepSeek, "question");
+        verify(client).chat("qwen", qwen, "question");
+        verify(callLogService).recordAsync(
+                eq("request-4"),
+                eq("chat"),
+                eq("deepseek"),
+                eq(false),
+                anyLong(),
+                anyString()
+        );
     }
 
     private LlmProperties.Provider provider(String chatModel, String embeddingModel) {

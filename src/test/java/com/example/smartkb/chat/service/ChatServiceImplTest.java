@@ -5,6 +5,7 @@ import com.example.smartkb.chat.entity.Conversation;
 import com.example.smartkb.chat.service.impl.ChatServiceImpl;
 import com.example.smartkb.common.UserContext;
 import com.example.smartkb.llm.service.LlmGatewayService;
+import com.example.smartkb.llm.exception.AllLlmProviderFailedException;
 import com.example.smartkb.search.model.QueryRewriteResult;
 import com.example.smartkb.search.service.QueryRewriteService;
 import com.example.smartkb.search.service.RetrievalService;
@@ -158,6 +159,40 @@ class ChatServiceImplTest {
         );
         verify(chatPersistenceService).persistExchange(
                 eq(21L), eq("你好"), eq("你好！"), eq("你好"), eq(false), eq(List.of())
+        );
+    }
+
+    @Test
+    void shouldReturnErrorAndDoneWhenAllProvidersFail() throws Exception {
+        ChatStreamRequest request = new ChatStreamRequest();
+        request.setKbId(1L);
+        request.setQuestion("知识库问题");
+        Conversation conversation = new Conversation();
+        conversation.setId(22L);
+        conversation.setKbId(1L);
+        conversation.setUserId(7L);
+        when(conversationService.getOrCreate(null, 1L, 7L, "知识库问题")).thenReturn(conversation);
+        when(chatHistoryService.getRecentHistory(22L)).thenReturn(List.of());
+        when(queryRewriteService.rewrite("知识库问题", List.of()))
+                .thenReturn(new QueryRewriteResult(true, "知识库问题"));
+        when(retrievalService.retrieve(1L, "知识库问题", 5))
+                .thenThrow(new AllLlmProviderFailedException(new IllegalStateException("all failed")));
+
+        List<ServerSentEvent<String>> events = chatService.stream(request).collectList().block();
+
+        assertThat(events).isNotNull().hasSize(3);
+        assertThat(eventType(events.get(0))).isEqualTo("rewrite");
+        assertThat(eventType(events.get(1))).isEqualTo("error");
+        assertThat(objectMapper.readTree(events.get(1).data()).path("message").asText())
+                .isEqualTo("AI 服务暂时不可用，请稍后再试");
+        assertThat(eventType(events.get(2))).isEqualTo("done");
+        verify(chatPersistenceService, never()).persistExchange(
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyList()
         );
     }
 

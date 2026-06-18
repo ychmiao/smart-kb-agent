@@ -65,6 +65,22 @@ logging:
     root: INFO
     com.example.smartkb: INFO
 
+resilience4j:
+  circuitbreaker:
+    instances:
+      deepseek:
+        failure-rate-threshold: 50
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+      qwen:
+        failure-rate-threshold: 50
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+
 kb:
   jwt:
     secret: ${JWT_SECRET}

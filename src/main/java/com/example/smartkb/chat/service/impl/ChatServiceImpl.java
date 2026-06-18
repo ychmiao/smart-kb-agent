@@ -4,6 +4,7 @@ import com.example.smartkb.chat.dto.ChatStreamRequest;
 import com.example.smartkb.chat.entity.Conversation;
 import com.example.smartkb.chat.model.ChatHistoryMessage;
 import com.example.smartkb.chat.model.DoneSseEvent;
+import com.example.smartkb.chat.model.ErrorSseEvent;
 import com.example.smartkb.chat.model.RewriteSseEvent;
 import com.example.smartkb.chat.model.SourceReference;
 import com.example.smartkb.chat.model.SourcesSseEvent;
@@ -14,6 +15,7 @@ import com.example.smartkb.chat.service.ChatService;
 import com.example.smartkb.chat.service.ConversationService;
 import com.example.smartkb.common.UserContext;
 import com.example.smartkb.llm.service.LlmGatewayService;
+import com.example.smartkb.llm.exception.AllLlmProviderFailedException;
 import com.example.smartkb.search.service.RetrievalService;
 import com.example.smartkb.search.model.QueryRewriteResult;
 import com.example.smartkb.search.service.QueryRewriteService;
@@ -71,7 +73,9 @@ public class ChatServiceImpl implements ChatService {
                 question
         );
         List<ChatHistoryMessage> history = chatHistoryService.getRecentHistory(conversation.getId());
-        return Mono.fromCallable(() -> queryRewriteService.rewrite(question, history))
+        Flux<ServerSentEvent<String>> stream = Mono.fromCallable(
+                        () -> queryRewriteService.rewrite(question, history)
+                )
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMapMany(rewriteResult -> Flux.concat(
                         Flux.just(sse(new RewriteSseEvent(
@@ -86,6 +90,13 @@ public class ChatServiceImpl implements ChatService {
                                 rewriteResult
                         )
                 ));
+        return stream.onErrorResume(
+                this::isAllProviderFailedException,
+                exception -> Flux.just(
+                        sse(new ErrorSseEvent("AI 服务暂时不可用，请稍后再试")),
+                        sse(new DoneSseEvent())
+                )
+        );
     }
 
     private Flux<ServerSentEvent<String>> routeAnswer(Conversation conversation, Long kbId,
@@ -231,5 +242,16 @@ public class ChatServiceImpl implements ChatService {
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("SSE 事件序列化失败", exception);
         }
+    }
+
+    private boolean isAllProviderFailedException(Throwable exception) {
+        Throwable current = reactor.core.Exceptions.unwrap(exception);
+        while (current != null) {
+            if (current instanceof AllLlmProviderFailedException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

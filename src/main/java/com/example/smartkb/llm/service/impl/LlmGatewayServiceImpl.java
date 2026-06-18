@@ -7,6 +7,10 @@ import com.example.smartkb.llm.config.LlmProperties;
 import com.example.smartkb.llm.exception.AllLlmProviderFailedException;
 import com.example.smartkb.llm.service.LlmCallLogService;
 import com.example.smartkb.llm.service.LlmGatewayService;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -28,12 +32,17 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
     private final OpenAiCompatibleClient client;
     private final LlmProperties properties;
     private final LlmCallLogService callLogService;
+    private final CircuitBreaker deepSeekCircuitBreaker;
+    private final CircuitBreaker qwenCircuitBreaker;
 
     public LlmGatewayServiceImpl(OpenAiCompatibleClient client, LlmProperties properties,
-                                 LlmCallLogService callLogService) {
+                                 LlmCallLogService callLogService,
+                                 CircuitBreakerRegistry circuitBreakerRegistry) {
         this.client = client;
         this.properties = properties;
         this.callLogService = callLogService;
+        this.deepSeekCircuitBreaker = circuitBreakerRegistry.circuitBreaker(DEEPSEEK);
+        this.qwenCircuitBreaker = circuitBreakerRegistry.circuitBreaker(QWEN);
     }
 
     @Override
@@ -45,6 +54,7 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                     normalizedRequestId,
                     DEEPSEEK,
                     properties.getProviders().getDeepseek(),
+                    deepSeekCircuitBreaker,
                     prompt
             );
         } catch (LlmProviderException deepSeekException) {
@@ -54,6 +64,7 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                         normalizedRequestId,
                         QWEN,
                         properties.getProviders().getQwen(),
+                        qwenCircuitBreaker,
                         prompt
                 );
             } catch (LlmProviderException qwenException) {
@@ -72,6 +83,7 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                 normalizedRequestId,
                 DEEPSEEK,
                 properties.getProviders().getDeepseek(),
+                deepSeekCircuitBreaker,
                 prompt
         )
                 .doOnNext(token -> deepSeekEmitted.set(true))
@@ -85,6 +97,7 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                             normalizedRequestId,
                             QWEN,
                             properties.getProviders().getQwen(),
+                            qwenCircuitBreaker,
                             prompt
                     ).onErrorMap(AllLlmProviderFailedException::new);
                 });
@@ -96,39 +109,44 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
         validateText(text, "text");
         long startNanos = System.nanoTime();
         try {
-            List<Double> vector = client.embedding(
-                    QWEN,
-                    properties.getProviders().getQwen(),
-                    text
-            );
+            List<Double> vector = qwenCircuitBreaker.executeSupplier(() -> client.embedding(
+                    QWEN, properties.getProviders().getQwen(), text
+            ));
             recordSafely(normalizedRequestId, EMBEDDING, QWEN, true, elapsedMillis(startNanos), null);
             return vector;
-        } catch (LlmProviderException exception) {
+        } catch (RuntimeException exception) {
             recordSafely(normalizedRequestId, EMBEDDING, QWEN, false,
                     elapsedMillis(startNanos), exception.getMessage());
-            throw new AllLlmProviderFailedException(exception);
+            throw new AllLlmProviderFailedException(toProviderException(QWEN, exception));
         }
     }
 
     private String callChatProvider(String requestId, String providerName,
-                                    LlmProperties.Provider provider, String prompt) {
+                                    LlmProperties.Provider provider,
+                                    CircuitBreaker circuitBreaker,
+                                    String prompt) {
         long startNanos = System.nanoTime();
         try {
-            String response = client.chat(providerName, provider, prompt);
+            String response = circuitBreaker.executeSupplier(
+                    () -> client.chat(providerName, provider, prompt)
+            );
             recordSafely(requestId, CHAT, providerName, true, elapsedMillis(startNanos), null);
             return response;
-        } catch (LlmProviderException exception) {
+        } catch (RuntimeException exception) {
             recordSafely(requestId, CHAT, providerName, false,
                     elapsedMillis(startNanos), exception.getMessage());
-            throw exception;
+            throw toProviderException(providerName, exception);
         }
     }
 
     private Flux<String> streamChatProvider(String requestId, String providerName,
-                                            LlmProperties.Provider provider, String prompt) {
+                                            LlmProperties.Provider provider,
+                                            CircuitBreaker circuitBreaker,
+                                            String prompt) {
         return Flux.defer(() -> {
             long startNanos = System.nanoTime();
             return client.streamChat(providerName, provider, prompt)
+                    .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
                     .doOnComplete(() -> recordSafely(
                             requestId,
                             STREAM_CHAT,
@@ -154,6 +172,16 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                             "流式调用被客户端取消"
                     ));
         });
+    }
+
+    private LlmProviderException toProviderException(String providerName, RuntimeException exception) {
+        if (exception instanceof LlmProviderException providerException) {
+            return providerException;
+        }
+        if (exception instanceof CallNotPermittedException) {
+            return new LlmProviderException(providerName, "模型服务熔断器已开启", exception);
+        }
+        return new LlmProviderException(providerName, "模型服务调用失败", exception);
     }
 
     private void recordSafely(String requestId, String callType, String providerName,
