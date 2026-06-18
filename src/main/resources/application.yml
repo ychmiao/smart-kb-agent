@@ -88,3 +88,9 @@ kb:
         chat-model: ${QWEN_CHAT_MODEL:qwen-plus}
         embedding-model: ${QWEN_EMBEDDING_MODEL:text-embedding-v3}
         priority: 2
+  milvus:
+    host: ${MILVUS_HOST:localhost}
+    port: ${MILVUS_PORT:19530}
+    dimension: ${MILVUS_DIMENSION:1024}
+    connect-timeout: 10s
+    rpc-timeout: 60s

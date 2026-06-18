@@ -99,6 +99,20 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 .toList();
     }
 
+    @Override
+    public Map<Long, String> getFileNames(Long knowledgeBaseId, Set<Long> documentIds) {
+        knowledgeBaseService.requireCurrentUserKnowledgeBase(knowledgeBaseId);
+        if (documentIds == null || documentIds.isEmpty()) {
+            return Map.of();
+        }
+        return lambdaQuery()
+                .eq(Document::getKbId, knowledgeBaseId)
+                .in(Document::getId, documentIds)
+                .list()
+                .stream()
+                .collect(java.util.stream.Collectors.toMap(Document::getId, Document::getFileName));
+    }
+
     private ValidatedFile validateFile(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new BusinessException(40010, "上传文件不能为空");

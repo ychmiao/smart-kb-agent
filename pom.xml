@@ -25,6 +25,7 @@
         <jjwt.version>0.12.6</jjwt.version>
         <minio.version>8.5.12</minio.version>
         <tika.version>2.9.2</tika.version>
+        <milvus.version>2.4.10</milvus.version>
     </properties>
 
     <dependencies>
@@ -98,6 +99,11 @@
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-parsers-standard-package</artifactId>
             <version>${tika.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.milvus</groupId>
+            <artifactId>milvus-sdk-java</artifactId>
+            <version>${milvus.version}</version>
         </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>

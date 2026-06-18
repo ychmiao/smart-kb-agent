@@ -6,6 +6,8 @@ import com.example.smartkb.document.mapper.DocumentMapper;
 import com.example.smartkb.document.model.DocumentChunk;
 import com.example.smartkb.document.model.DocumentStatus;
 import com.example.smartkb.document.storage.MinioFileStorage;
+import com.example.smartkb.llm.service.LlmGatewayService;
+import com.example.smartkb.search.store.MilvusVectorStore;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
 import org.springframework.scheduling.annotation.Async;
@@ -13,6 +15,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
 import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -24,13 +27,18 @@ public class DocumentProcessingService {
     private final MinioFileStorage minioFileStorage;
     private final Tika tika;
     private final SemanticChunker semanticChunker;
+    private final LlmGatewayService llmGatewayService;
+    private final MilvusVectorStore milvusVectorStore;
 
     public DocumentProcessingService(DocumentMapper documentMapper, MinioFileStorage minioFileStorage,
-                                     Tika tika, SemanticChunker semanticChunker) {
+                                     Tika tika, SemanticChunker semanticChunker,
+                                     LlmGatewayService llmGatewayService, MilvusVectorStore milvusVectorStore) {
         this.documentMapper = documentMapper;
         this.minioFileStorage = minioFileStorage;
         this.tika = tika;
         this.semanticChunker = semanticChunker;
+        this.llmGatewayService = llmGatewayService;
+        this.milvusVectorStore = milvusVectorStore;
     }
 
     @Async("documentTaskExecutor")
@@ -48,12 +56,25 @@ public class DocumentProcessingService {
                 throw new IllegalStateException("文档未解析出有效文本");
             }
 
+            List<List<Double>> embeddings = chunks.stream()
+                    .map(chunk -> llmGatewayService.embedding(
+                            embeddingRequestId(documentId, chunk.getChunkIndex()),
+                            chunk.getContent()
+                    ))
+                    .toList();
+            milvusVectorStore.insertChunks(document.getKbId(), chunks, embeddings);
             updateCompleted(document, chunks.size());
-            log.info("Document parsed successfully: documentId={}, chunkCount={}", documentId, chunks.size());
+            log.info("Document parsed and vectorized successfully: documentId={}, chunkCount={}",
+                    documentId, chunks.size());
         } catch (Exception exception) {
             updateFailed(document, exception);
             log.error("Document parsing failed: documentId={}", documentId, exception);
         }
+    }
+
+    private String embeddingRequestId(Long documentId, Integer chunkIndex) {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        return "doc-" + documentId + "-chunk-" + chunkIndex + "-" + suffix;
     }
 
     public void markSubmissionFailed(Long documentId, RuntimeException exception) {
@@ -92,4 +113,3 @@ public class DocumentProcessingService {
         return sanitized.substring(0, Math.min(MAX_ERROR_MESSAGE_LENGTH, sanitized.length()));
     }
 }
-

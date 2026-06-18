@@ -6,11 +6,14 @@ import com.example.smartkb.document.vo.DocumentResponse;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public interface DocumentService extends IService<Document> {
 
     Long upload(MultipartFile file, Long knowledgeBaseId);
 
     List<DocumentResponse> listCurrentUserDocuments(Long knowledgeBaseId);
-}
 
+    Map<Long, String> getFileNames(Long knowledgeBaseId, Set<Long> documentIds);
+}

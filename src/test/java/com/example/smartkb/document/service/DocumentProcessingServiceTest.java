@@ -5,6 +5,8 @@ import com.example.smartkb.document.entity.Document;
 import com.example.smartkb.document.mapper.DocumentMapper;
 import com.example.smartkb.document.model.DocumentStatus;
 import com.example.smartkb.document.storage.MinioFileStorage;
+import com.example.smartkb.llm.service.LlmGatewayService;
+import com.example.smartkb.search.store.MilvusVectorStore;
 import org.apache.tika.Tika;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,7 +22,10 @@ import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -35,6 +40,12 @@ class DocumentProcessingServiceTest {
     @Mock
     private Tika tika;
 
+    @Mock
+    private LlmGatewayService llmGatewayService;
+
+    @Mock
+    private MilvusVectorStore milvusVectorStore;
+
     private DocumentProcessingService processingService;
     private Document document;
 
@@ -44,7 +55,9 @@ class DocumentProcessingServiceTest {
                 documentMapper,
                 minioFileStorage,
                 tika,
-                new SemanticChunker()
+                new SemanticChunker(),
+                llmGatewayService,
+                milvusVectorStore
         );
         document = new Document();
         document.setId(1L);
@@ -60,12 +73,16 @@ class DocumentProcessingServiceTest {
         when(documentMapper.selectById(1L)).thenReturn(document);
         when(minioFileStorage.download(document.getMinioPath())).thenReturn(inputStream);
         when(tika.parseToString(any(InputStream.class))).thenReturn("a".repeat(900));
+        when(llmGatewayService.embedding(any(String.class), any(String.class)))
+                .thenReturn(java.util.Collections.nCopies(1024, 0.1));
         when(documentMapper.updateById(any(Document.class))).thenReturn(1);
 
         processingService.process(1L);
 
         ArgumentCaptor<Document> captor = ArgumentCaptor.forClass(Document.class);
         verify(documentMapper).updateById(captor.capture());
+        verify(llmGatewayService, times(2)).embedding(any(String.class), any(String.class));
+        verify(milvusVectorStore).insertChunks(eq(2L), anyList(), anyList());
         assertThat(captor.getValue().getStatus()).isEqualTo(DocumentStatus.COMPLETED.getCode());
         assertThat(captor.getValue().getChunkCount()).isEqualTo(2);
         assertThat(captor.getValue().getErrorMsg()).isNull();
@@ -87,4 +104,3 @@ class DocumentProcessingServiceTest {
         assertThat(captor.getValue().getErrorMsg()).isEqualTo("broken document");
     }
 }
-
