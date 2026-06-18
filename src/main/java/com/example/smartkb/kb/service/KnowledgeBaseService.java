@@ -13,6 +13,7 @@ public interface KnowledgeBaseService extends IService<KnowledgeBase> {
 
     List<KnowledgeBaseResponse> listCurrentUserKnowledgeBases();
 
+    KnowledgeBase requireCurrentUserKnowledgeBase(Long knowledgeBaseId);
+
     void deleteCurrentUserKnowledgeBase(Long knowledgeBaseId);
 }
-

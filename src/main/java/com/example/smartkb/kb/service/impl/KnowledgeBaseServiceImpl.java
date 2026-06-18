@@ -59,8 +59,7 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void deleteCurrentUserKnowledgeBase(Long knowledgeBaseId) {
+    public KnowledgeBase requireCurrentUserKnowledgeBase(Long knowledgeBaseId) {
         Long userId = UserContext.requireUserId();
         KnowledgeBase knowledgeBase = lambdaQuery()
                 .eq(KnowledgeBase::getId, knowledgeBaseId)
@@ -69,6 +68,14 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
         if (knowledgeBase == null) {
             throw new BusinessException(40401, "知识库不存在");
         }
+        return knowledgeBase;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteCurrentUserKnowledgeBase(Long knowledgeBaseId) {
+        Long userId = UserContext.requireUserId();
+        requireCurrentUserKnowledgeBase(knowledgeBaseId);
 
         boolean deleted = lambdaUpdate()
                 .eq(KnowledgeBase::getId, knowledgeBaseId)
