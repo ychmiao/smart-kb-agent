@@ -54,6 +54,13 @@
       <div class="chat-main">
         <!-- Messages area -->
         <div class="messages-area" ref="messagesRef">
+          <!-- Rewrite banner: shows before AI response streaming -->
+          <div v-if="showRewriteBanner" class="rewrite-banner">
+            <el-tag size="small" type="warning" effect="light" hit>
+              问题已重写为：{{ streamRewrite }}
+            </el-tag>
+          </div>
+
           <!-- Loading messages -->
           <div v-if="msgLoading" class="msg-loading">
             <el-skeleton :rows="6" animated />
@@ -226,6 +233,7 @@ const isStreaming = ref(false)
 const waitingResponse = ref(false)
 const question = ref('')
 const streamRewrite = ref('')
+const showRewriteBanner = ref(false)
 const streamSources = ref<SourceReference[]>([])
 const currentAiMessage = ref<any>(null)
 const abortController = ref<AbortController | null>(null)
@@ -300,6 +308,7 @@ async function sendQuestion() {
   waitingResponse.value = true
   currentAiMessage.value = null
   streamRewrite.value = ''
+  showRewriteBanner.value = false
   streamSources.value = []
 
   scrollToBottom()
@@ -353,11 +362,16 @@ function handleSseEvent(event: SseEvent) {
   switch (event.type) {
     case SseEventType.Rewrite:
       streamRewrite.value = event.rewrittenQuery
+      showRewriteBanner.value = true
       msg.rewrittenQuery = event.rewrittenQuery
       msg.needRetrieval = event.needRetrieval
       break
 
     case SseEventType.Token:
+      // Once the first token arrives, hide the rewrite banner if still visible
+      if (showRewriteBanner.value) {
+        showRewriteBanner.value = false
+      }
       msg.content += event.content
       scrollToBottom()
       break
@@ -549,6 +563,24 @@ onUnmounted(() => {
 
 .msg-loading {
   padding: 20px;
+}
+
+.rewrite-banner {
+  text-align: center;
+  padding: 8px 16px;
+  margin-bottom: 12px;
+  animation: fadeSlideDown 0.25s ease-out;
+}
+
+@keyframes fadeSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .msg-empty {
