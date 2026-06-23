@@ -14,12 +14,22 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+/**
+ * 会话历史缓存服务 —— 使用 Redis 存储最近 N 条对话消息。
+ * <p>
+ * Key 格式：{@code chat:history:{conversationId}}，Value 为 JSON 序列化的消息列表。
+ * 读取时优先查 Redis，未命中或 Redis 异常时回源 MySQL（{@code kb_message} 表）。
+ * 写入时追加新消息并裁剪至最近 10 条，设置 7 天 TTL。
+ */
 @Slf4j
 @Service
 public class ChatHistoryService {
 
+    /** Redis Key 前缀 */
     private static final String HISTORY_KEY_PREFIX = "chat:history:";
+    /** 保留的最大历史消息数 */
     private static final int MAX_HISTORY_MESSAGES = 10;
+    /** Redis 过期时间 */
     private static final Duration HISTORY_TTL = Duration.ofDays(7);
 
     private final StringRedisTemplate redisTemplate;

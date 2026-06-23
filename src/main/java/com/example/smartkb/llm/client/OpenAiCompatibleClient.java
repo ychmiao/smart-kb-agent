@@ -14,11 +14,21 @@ import reactor.core.publisher.Flux;
 
 import java.util.List;
 
+/**
+ * OpenAI 兼容协议客户端 —— 对接 DeepSeek 和 Qwen 的 HTTP API。
+ * <p>
+ * 使用 Spring WebFlux WebClient 发起请求，支持同步 Chat、流式 SSE Chat
+ * 和 Embedding 三种调用模式。流式响应解析 SSE 事件，过滤空行和 [DONE] 标记。
+ * 所有 HTTP 异常统一转为 {@link LlmProviderException}，由网关层处理降级逻辑。
+ */
 @Component
 public class OpenAiCompatibleClient {
 
+    /** Chat Completions API 路径 */
     private static final String CHAT_COMPLETIONS_PATH = "/chat/completions";
+    /** Embeddings API 路径 */
     private static final String EMBEDDINGS_PATH = "/embeddings";
+    /** 流式响应结束标记 */
     private static final String DONE_EVENT = "[DONE]";
 
     private final WebClient webClient;

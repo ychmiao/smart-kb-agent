@@ -12,6 +12,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
 
+/**
+ * 会话消息持久化服务 —— 异步保存问答对到 MySQL，并更新 Redis 历史缓存。
+ * <p>
+ * 使用 TransactionTemplate 保证用户问题 + AI 回答在同一个事务中写入。
+ * 持久化后在独立步骤中更新 Redis 列表（即使失败也不影响数据库一致性）。
+ * 使用独立线程池 {@code chatPersistenceTaskExecutor}，不阻塞 SSE 流式响应。
+ */
 @Slf4j
 @Service
 public class ChatPersistenceService {
@@ -34,7 +41,8 @@ public class ChatPersistenceService {
     @Async("chatPersistenceTaskExecutor")
     public void persistExchange(Long conversationId, String question, String answer,
                                 String rewrittenQuery, boolean needRetrieval,
-                                List<SourceReference> sources) {
+                                List<SourceReference> sources,
+                                String llmProvider, Integer estimatedTokens) {
         try {
             String sourceJson = objectMapper.writeValueAsString(sources);
             transactionTemplate.executeWithoutResult(status -> {
@@ -44,7 +52,9 @@ public class ChatPersistenceService {
                         question,
                         null,
                         rewrittenQuery,
-                        needRetrieval ? 1 : 0
+                        needRetrieval ? 1 : 0,
+                        null,
+                        null
                 );
                 ChatMessage assistantMessage = createMessage(
                         conversationId,
@@ -52,7 +62,9 @@ public class ChatPersistenceService {
                         answer,
                         sourceJson,
                         rewrittenQuery,
-                        needRetrieval ? 1 : 0
+                        needRetrieval ? 1 : 0,
+                        llmProvider,
+                        estimatedTokens
                 );
                 if (chatMessageMapper.insert(userMessage) != 1
                         || chatMessageMapper.insert(assistantMessage) != 1) {
@@ -65,8 +77,16 @@ public class ChatPersistenceService {
         }
     }
 
+    public void persistExchange(Long conversationId, String question, String answer,
+                                String rewrittenQuery, boolean needRetrieval,
+                                List<SourceReference> sources) {
+        persistExchange(conversationId, question, answer, rewrittenQuery,
+                needRetrieval, sources, null, null);
+    }
+
     private ChatMessage createMessage(Long conversationId, String role, String content,
-                                      String sourceDocs, String rewrittenQuery, int needRetrieval) {
+                                      String sourceDocs, String rewrittenQuery, int needRetrieval,
+                                      String llmProvider, Integer tokenCount) {
         ChatMessage message = new ChatMessage();
         message.setConversationId(conversationId);
         message.setRole(role);
@@ -74,6 +94,8 @@ public class ChatPersistenceService {
         message.setSourceDocs(sourceDocs);
         message.setRewrittenQuery(rewrittenQuery);
         message.setNeedRetrieval(needRetrieval);
+        message.setLlmProvider(llmProvider);
+        message.setTokenCount(tokenCount);
         return message;
     }
 }

@@ -32,10 +32,27 @@ import reactor.core.scheduler.Schedulers;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Chat 服务实现 —— SSE 流式问答的主编排器。
+ * <p>
+ * 调用链：
+ * <ol>
+ *   <li>获取/创建会话 + 校验归属</li>
+ *   <li>从 Redis（或 MySQL）获取最近 10 条历史</li>
+ *   <li>调用 QueryRewriteService 做意图识别和查询重写</li>
+ *   <li>返回 rewrite SSE 事件</li>
+ *   <li>若 needRetrieval=true，调用 RetrievalService 检索 Top5 文档片段</li>
+ *   <li>构造 RAG/闲聊 Prompt，调用 LlmGatewayService.streamChat()</li>
+ *   <li>流式返回 token 事件 → sources 事件 → done 事件</li>
+ *   <li>异步持久化问答对到 MySQL 并更新 Redis 历史</li>
+ * </ol>
+ * 全部异常通过 {@code onErrorResume} 统一转为 error + done，保证连接正常结束。
+ */
 @Slf4j
 @Service
 public class ChatServiceImpl implements ChatService {
 
+    /** 检索时返回的 TopK 文档片段数 */
     private static final int RETRIEVAL_TOP_K = 5;
 
     private final ConversationService conversationService;
@@ -83,6 +100,7 @@ public class ChatServiceImpl implements ChatService {
                                 rewriteResult.getRewrittenQuery()
                         ))),
                         routeAnswer(
+                                userId,
                                 conversation,
                                 request.getKbId(),
                                 question,
@@ -90,16 +108,18 @@ public class ChatServiceImpl implements ChatService {
                                 rewriteResult
                         )
                 ));
-        return stream.onErrorResume(
-                this::isAllProviderFailedException,
-                exception -> Flux.just(
-                        sse(new ErrorSseEvent("AI 服务暂时不可用，请稍后再试")),
-                        sse(new DoneSseEvent())
-                )
-        );
+        return stream.onErrorResume(exception -> {
+            String message = resolveErrorMessage(exception);
+            log.error("SSE stream error: conversationId={}, kbId={}",
+                    conversation.getId(), request.getKbId(), exception);
+            return Flux.just(
+                    sse(new ErrorSseEvent(message)),
+                    sse(new DoneSseEvent())
+            );
+        });
     }
 
-    private Flux<ServerSentEvent<String>> routeAnswer(Conversation conversation, Long kbId,
+    private Flux<ServerSentEvent<String>> routeAnswer(Long userId, Conversation conversation, Long kbId,
                                                        String question, List<ChatHistoryMessage> history,
                                                        QueryRewriteResult rewriteResult) {
         if (!rewriteResult.getNeedRetrieval()) {
@@ -111,11 +131,14 @@ public class ChatServiceImpl implements ChatService {
                     rewriteResult
             );
         }
-        return Mono.fromCallable(() -> retrievalService.retrieve(
-                        kbId,
-                        rewriteResult.getRewrittenQuery(),
-                        RETRIEVAL_TOP_K
-                ))
+        return Mono.fromCallable(() -> {
+                    UserContext.setUserId(userId);
+                    return retrievalService.retrieve(
+                            kbId,
+                            rewriteResult.getRewrittenQuery(),
+                            RETRIEVAL_TOP_K
+                    );
+                })
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMapMany(chunks -> streamAnswer(
                         conversation,
@@ -135,6 +158,7 @@ public class ChatServiceImpl implements ChatService {
                 : buildChatPrompt(question, history);
         String requestId = "chat-" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
         StringBuilder answer = new StringBuilder();
+        String[] usedProvider = {null};
         List<SourceReference> sources = chunks.stream()
                 .map(chunk -> new SourceReference(
                         chunk.getDocId(),
@@ -143,16 +167,22 @@ public class ChatServiceImpl implements ChatService {
                 ))
                 .toList();
 
-        Flux<ServerSentEvent<String>> tokenEvents = llmGatewayService.streamChat(requestId, prompt)
-                .doOnNext(answer::append)
+        Flux<ServerSentEvent<String>> tokenEvents = llmGatewayService
+                .streamChat(requestId, prompt, provider -> usedProvider[0] = provider)
+                .doOnNext(token -> {
+                    answer.append(token);
+                })
                 .map(token -> sse(new TokenSseEvent(token)));
         Flux<ServerSentEvent<String>> terminalEvents = Flux.defer(() -> {
+            // token_count: OpenAI 兼容流式接口不提供 usage，保存 null 而非估算值
             submitPersistence(
                     conversation.getId(),
                     question,
                     answer.toString(),
                     rewriteResult,
-                    sources
+                    sources,
+                    usedProvider[0],
+                    null
             );
             return Flux.just(
                     sse(new SourcesSseEvent(sources)),
@@ -164,7 +194,8 @@ public class ChatServiceImpl implements ChatService {
 
     private void submitPersistence(Long conversationId, String question, String answer,
                                    QueryRewriteResult rewriteResult,
-                                   List<SourceReference> sources) {
+                                   List<SourceReference> sources,
+                                   String llmProvider, Integer estimatedTokens) {
         try {
             chatPersistenceService.persistExchange(
                     conversationId,
@@ -172,7 +203,9 @@ public class ChatServiceImpl implements ChatService {
                     answer,
                     rewriteResult.getRewrittenQuery(),
                     rewriteResult.getNeedRetrieval(),
-                    sources
+                    sources,
+                    llmProvider,
+                    estimatedTokens
             );
         } catch (RuntimeException exception) {
             log.error("Failed to submit chat persistence task: conversationId={}",
@@ -244,14 +277,17 @@ public class ChatServiceImpl implements ChatService {
         }
     }
 
-    private boolean isAllProviderFailedException(Throwable exception) {
+    private String resolveErrorMessage(Throwable exception) {
         Throwable current = reactor.core.Exceptions.unwrap(exception);
         while (current != null) {
             if (current instanceof AllLlmProviderFailedException) {
-                return true;
+                return "AI 服务暂时不可用，请稍后再试";
+            }
+            if (current instanceof com.example.smartkb.common.BusinessException) {
+                return current.getMessage();
             }
             current = current.getCause();
         }
-        return false;
+        return "服务处理异常，请稍后重试";
     }
 }

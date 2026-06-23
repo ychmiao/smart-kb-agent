@@ -15,5 +15,7 @@ public interface DocumentService extends IService<Document> {
 
     List<DocumentResponse> listCurrentUserDocuments(Long knowledgeBaseId);
 
+    void deleteCurrentUserDocument(Long documentId);
+
     Map<Long, String> getFileNames(Long knowledgeBaseId, Set<Long> documentIds);
 }

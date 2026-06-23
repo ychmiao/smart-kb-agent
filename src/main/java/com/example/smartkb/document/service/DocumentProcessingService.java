@@ -17,10 +17,18 @@ import java.io.InputStream;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 文档异步处理服务 —— 执行 Tika 解析 → 语义分块 → Embedding → Milvus 入库。
+ * <p>
+ * 由 {@link DocumentServiceImpl#submitProcessingTask} 通过 {@code @Async("documentTaskExecutor")} 触发。
+ * 处理成功更新文档状态为 COMPLETED，失败更新为 FAILED 并记录可诊断的错误信息。
+ * 整个流程在独立线程池中执行，不阻塞上传接口返回。
+ */
 @Slf4j
 @Service
 public class DocumentProcessingService {
 
+    /** 错误消息最大长度，避免存储过长的异常堆栈 */
     private static final int MAX_ERROR_MESSAGE_LENGTH = 1000;
 
     private final DocumentMapper documentMapper;

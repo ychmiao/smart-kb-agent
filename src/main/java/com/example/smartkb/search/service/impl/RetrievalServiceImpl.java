@@ -16,6 +16,18 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+/**
+ * 检索服务实现 —— 查询嵌入 → Milvus 向量检索 → 补充文档名。
+ * <p>
+ * 调用链路：
+ * <ol>
+ *   <li>校验知识库归属</li>
+ *   <li>调用 LlmGatewayService.embedding() 将查询转为向量</li>
+ *   <li>在 kb_{kbId} collection 中执行 COSINE 相似度搜索</li>
+ *   <li>通过 DocumentService 批量查询文档名称</li>
+ *   <li>组装 RetrievedChunk 返回（含 score、content、fileName）</li>
+ * </ol>
+ */
 @Service
 public class RetrievalServiceImpl implements RetrievalService {
 

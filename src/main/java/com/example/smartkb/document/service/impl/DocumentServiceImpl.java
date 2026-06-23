@@ -11,6 +11,7 @@ import com.example.smartkb.document.service.DocumentService;
 import com.example.smartkb.document.storage.MinioFileStorage;
 import com.example.smartkb.document.vo.DocumentResponse;
 import com.example.smartkb.kb.service.KnowledgeBaseService;
+import com.example.smartkb.search.store.MilvusVectorStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -21,13 +22,24 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+/**
+ * 文档服务实现 —— 上传校验、MinIO 存储、异步处理触发和幂等删除。
+ * <p>
+ * 上传流程：校验（类型/MIME/大小）→ MinIO 上传 → MySQL 处理中记录 → 异步提交处理任务
+ * 删除流程（幂等）：校验归属/状态 → Milvus 删除向量 → MinIO 删除文件 → MySQL 逻辑删除
+ * 补偿：上传后若数据库写入失败，调用 {@code removeQuietly} 清理已上传的 MinIO 文件
+ */
 @Slf4j
 @Service
 public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> implements DocumentService {
 
+    /** 文件大小上限：50MB */
     private static final long MAX_FILE_SIZE = 50L * 1024 * 1024;
+    /** 文档初始 chunk 数 */
     private static final int INITIAL_CHUNK_COUNT = 0;
+    /** 允许上传的文件扩展名 */
     private static final Set<String> ALLOWED_FILE_TYPES = Set.of("pdf", "docx", "md", "txt");
+    /** 各文件类型允许的 Content-Type（含 application/octet-stream 兜底） */
     private static final Map<String, Set<String>> ALLOWED_CONTENT_TYPES = Map.of(
             "pdf", Set.of("application/pdf", "application/octet-stream"),
             "docx", Set.of(
@@ -41,12 +53,15 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
     private final KnowledgeBaseService knowledgeBaseService;
     private final MinioFileStorage minioFileStorage;
     private final DocumentProcessingService documentProcessingService;
+    private final MilvusVectorStore milvusVectorStore;
 
     public DocumentServiceImpl(KnowledgeBaseService knowledgeBaseService, MinioFileStorage minioFileStorage,
-                               DocumentProcessingService documentProcessingService) {
+                               DocumentProcessingService documentProcessingService,
+                               MilvusVectorStore milvusVectorStore) {
         this.knowledgeBaseService = knowledgeBaseService;
         this.minioFileStorage = minioFileStorage;
         this.documentProcessingService = documentProcessingService;
+        this.milvusVectorStore = milvusVectorStore;
     }
 
     @Override
@@ -97,6 +112,52 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 .stream()
                 .map(this::toResponse)
                 .toList();
+    }
+
+    @Override
+    public void deleteCurrentUserDocument(Long documentId) {
+        Document document = getById(documentId);
+        if (document == null) {
+            throw new BusinessException(40410, "文档不存在");
+        }
+        knowledgeBaseService.requireCurrentUserKnowledgeBase(document.getKbId());
+        if (DocumentStatus.PROCESSING.getCode() == document.getStatus()) {
+            throw new BusinessException(40910, "文档正在处理中，请稍后再删除");
+        }
+
+        // 删除顺序：Milvus → MinIO → MySQL
+        // 每一步都幂等，确保失败后可重试
+
+        // Step 1: 删除 Milvus 向量（幂等；失败则抛出，不继续后续操作）
+        milvusVectorStore.deleteDocument(document.getKbId(), document.getId());
+
+        // Step 2: 删除 MinIO 文件（幂等；失败则抛出，不继续后续操作）
+        if (document.getMinioPath() != null) {
+            minioFileStorage.remove(document.getMinioPath());
+        }
+
+        // Step 3: MySQL 逻辑删除（@TableLogic 转为 UPDATE is_deleted = 1）
+        if (!removeById(document.getId())) {
+            // 未命中记录：可能是并发删除或 MySQL 短暂失败
+            // 检查记录实际状态，确认是否已删除
+            if (isDocumentAlreadyDeleted(documentId)) {
+                log.warn("Document already deleted by concurrent request: documentId={}", documentId);
+                return;
+            }
+            throw new BusinessException(50013, "文档记录删除失败，请重试");
+        }
+
+        log.info("Document deleted: documentId={}, kbId={}", document.getId(), document.getKbId());
+    }
+
+    private boolean isDocumentAlreadyDeleted(Long documentId) {
+        try {
+            Document currentDoc = getBaseMapper().selectById(documentId);
+            return currentDoc == null || currentDoc.getIsDeleted() == 1;
+        } catch (Exception e) {
+            log.warn("Failed to check document deletion status: documentId={}", documentId, e);
+            return false;
+        }
     }
 
     @Override

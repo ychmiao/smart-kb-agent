@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 
@@ -118,6 +119,39 @@ class LlmGatewayServiceImplTest {
                 anyLong(),
                 anyString()
         );
+    }
+
+    @Test
+    void shouldStreamFallbackToQwenWhenDeepSeekFails() {
+        when(client.streamChat("deepseek", deepSeek, "question"))
+                .thenReturn(Flux.error(new LlmProviderException("deepseek", "timeout")));
+        when(client.streamChat("qwen", qwen, "question"))
+                .thenReturn(Flux.just("qwen ", "answer"));
+
+        List<String> tokens = gatewayService.streamChat("request-5", "question")
+                .collectList()
+                .block();
+
+        assertThat(tokens).containsExactly("qwen ", "answer");
+        verify(callLogService).recordAsync(
+                eq("request-5"), eq("stream_chat"), eq("deepseek"), eq(false), anyLong(), anyString()
+        );
+        verify(callLogService).recordAsync(
+                eq("request-5"), eq("stream_chat"), eq("qwen"), eq(true), anyLong(), eq(null)
+        );
+    }
+
+    @Test
+    void shouldThrowWhenBothStreamProvidersFail() {
+        when(client.streamChat("deepseek", deepSeek, "question"))
+                .thenReturn(Flux.error(new LlmProviderException("deepseek", "deepseek error")));
+        when(client.streamChat("qwen", qwen, "question"))
+                .thenReturn(Flux.error(new LlmProviderException("qwen", "qwen error")));
+
+        assertThatThrownBy(() ->
+                gatewayService.streamChat("request-6", "question").collectList().block()
+        ).isInstanceOf(AllLlmProviderFailedException.class)
+                .hasMessage("AI 服务暂时不可用，请稍后再试");
     }
 
     private LlmProperties.Provider provider(String chatModel, String embeddingModel) {

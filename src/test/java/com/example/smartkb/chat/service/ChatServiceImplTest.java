@@ -4,6 +4,7 @@ import com.example.smartkb.chat.dto.ChatStreamRequest;
 import com.example.smartkb.chat.entity.Conversation;
 import com.example.smartkb.chat.service.impl.ChatServiceImpl;
 import com.example.smartkb.common.UserContext;
+import com.example.smartkb.common.BusinessException;
 import com.example.smartkb.llm.service.LlmGatewayService;
 import com.example.smartkb.llm.exception.AllLlmProviderFailedException;
 import com.example.smartkb.search.model.QueryRewriteResult;
@@ -98,7 +99,8 @@ class ChatServiceImplTest {
                 .thenReturn(new QueryRewriteResult(true, "如何使用？"));
         when(retrievalService.retrieve(1L, "如何使用？", 5)).thenReturn(List.of(chunk));
         when(llmGatewayService.streamChat(org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.contains("使用说明")))
+                org.mockito.ArgumentMatchers.contains("使用说明"),
+                org.mockito.ArgumentMatchers.any()))
                 .thenReturn(Flux.just("请先", "阅读手册"));
 
         List<ServerSentEvent<String>> events = chatService.stream(request).collectList().block();
@@ -120,7 +122,9 @@ class ChatServiceImplTest {
                 eq("请先阅读手册"),
                 eq("如何使用？"),
                 eq(true),
-                sourcesCaptor.capture()
+                sourcesCaptor.capture(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any()
         );
         assertThat(sourcesCaptor.getValue()).hasSize(1);
         verify(retrievalService).retrieve(1L, "如何使用？", 5);
@@ -140,7 +144,8 @@ class ChatServiceImplTest {
         when(queryRewriteService.rewrite("你好", List.of()))
                 .thenReturn(new QueryRewriteResult(false, "你好"));
         when(llmGatewayService.streamChat(org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.contains("不需要查询知识库")))
+                org.mockito.ArgumentMatchers.contains("不需要查询知识库"),
+                org.mockito.ArgumentMatchers.any()))
                 .thenReturn(Flux.just("你好！"));
 
         List<ServerSentEvent<String>> events = chatService.stream(request).collectList().block();
@@ -158,7 +163,9 @@ class ChatServiceImplTest {
                 org.mockito.ArgumentMatchers.anyInt()
         );
         verify(chatPersistenceService).persistExchange(
-                eq(21L), eq("你好"), eq("你好！"), eq("你好"), eq(false), eq(List.of())
+                eq(21L), eq("你好"), eq("你好！"), eq("你好"), eq(false), eq(List.of()),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any()
         );
     }
 
@@ -185,6 +192,74 @@ class ChatServiceImplTest {
         assertThat(eventType(events.get(1))).isEqualTo("error");
         assertThat(objectMapper.readTree(events.get(1).data()).path("message").asText())
                 .isEqualTo("AI 服务暂时不可用，请稍后再试");
+        assertThat(eventType(events.get(2))).isEqualTo("done");
+        verify(chatPersistenceService, never()).persistExchange(
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyList()
+        );
+    }
+
+    @Test
+    void shouldReturnErrorAndDoneWhenBusinessExceptionThrown() throws Exception {
+        ChatStreamRequest request = new ChatStreamRequest();
+        request.setKbId(1L);
+        request.setQuestion("越权查询");
+        Conversation conversation = new Conversation();
+        conversation.setId(23L);
+        conversation.setKbId(1L);
+        conversation.setUserId(7L);
+        when(conversationService.getOrCreate(null, 1L, 7L, "越权查询")).thenReturn(conversation);
+        when(chatHistoryService.getRecentHistory(23L)).thenReturn(List.of());
+        when(queryRewriteService.rewrite("越权查询", List.of()))
+                .thenReturn(new QueryRewriteResult(true, "越权查询"));
+        when(retrievalService.retrieve(1L, "越权查询", 5))
+                .thenThrow(new BusinessException(40301, "知识库访问权限不足"));
+
+        List<ServerSentEvent<String>> events = chatService.stream(request).collectList().block();
+
+        assertThat(events).isNotNull().hasSize(3);
+        assertThat(eventType(events.get(0))).isEqualTo("rewrite");
+        assertThat(eventType(events.get(1))).isEqualTo("error");
+        assertThat(objectMapper.readTree(events.get(1).data()).path("message").asText())
+                .isEqualTo("知识库访问权限不足");
+        assertThat(eventType(events.get(2))).isEqualTo("done");
+        verify(chatPersistenceService, never()).persistExchange(
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyList()
+        );
+    }
+
+    @Test
+    void shouldReturnErrorAndDoneWhenGenericExceptionThrown() throws Exception {
+        ChatStreamRequest request = new ChatStreamRequest();
+        request.setKbId(1L);
+        request.setQuestion("故障测试");
+        Conversation conversation = new Conversation();
+        conversation.setId(24L);
+        conversation.setKbId(1L);
+        conversation.setUserId(7L);
+        when(conversationService.getOrCreate(null, 1L, 7L, "故障测试")).thenReturn(conversation);
+        when(chatHistoryService.getRecentHistory(24L)).thenReturn(List.of());
+        when(queryRewriteService.rewrite("故障测试", List.of()))
+                .thenReturn(new QueryRewriteResult(true, "故障测试"));
+        when(retrievalService.retrieve(1L, "故障测试", 5))
+                .thenThrow(new IllegalStateException("unexpected database error"));
+
+        List<ServerSentEvent<String>> events = chatService.stream(request).collectList().block();
+
+        assertThat(events).isNotNull().hasSize(3);
+        assertThat(eventType(events.get(0))).isEqualTo("rewrite");
+        assertThat(eventType(events.get(1))).isEqualTo("error");
+        assertThat(objectMapper.readTree(events.get(1).data()).path("message").asText())
+                .isEqualTo("服务处理异常，请稍后重试");
         assertThat(eventType(events.get(2))).isEqualTo("done");
         verify(chatPersistenceService, never()).persistExchange(
                 org.mockito.ArgumentMatchers.anyLong(),

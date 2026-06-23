@@ -69,6 +69,43 @@ class QueryRewriteServiceImplTest {
     }
 
     @Test
+    void shouldClassifyGeneralLifeQuestionWithoutRetrieval() {
+        when(llmGatewayService.chat(anyString(), anyString())).thenReturn(
+                "```json\n{\"needRetrieval\":false,\"rewrittenQuery\":\"一天吃几顿饭合适\"}\n```"
+        );
+
+        QueryRewriteResult result = queryRewriteService.rewrite("一天吃几顿饭合适", List.of());
+
+        assertThat(result.getNeedRetrieval()).isFalse();
+        assertThat(result.getRewrittenQuery()).isEqualTo("一天吃几顿饭合适");
+        ArgumentCaptor<String> promptCaptor = ArgumentCaptor.forClass(String.class);
+        verify(llmGatewayService).chat(anyString(), promptCaptor.capture());
+        assertThat(promptCaptor.getValue()).contains(
+                "闲聊、生活建议",
+                "一天吃几顿饭合适",
+                "needRetrieval=false"
+        );
+    }
+
+    @Test
+    void shouldPreferRetrievalForDomainQuestionWithoutExplicitDocumentWording() {
+        when(llmGatewayService.chat(anyString(), anyString())).thenReturn(
+                "{\"needRetrieval\":true,\"rewrittenQuery\":\"试用期多久\"}"
+        );
+
+        QueryRewriteResult result = queryRewriteService.rewrite("试用期多久", List.of());
+
+        assertThat(result.getNeedRetrieval()).isTrue();
+        assertThat(result.getRewrittenQuery()).isEqualTo("试用期多久");
+        ArgumentCaptor<String> promptCaptor = ArgumentCaptor.forClass(String.class);
+        verify(llmGatewayService).chat(anyString(), promptCaptor.capture());
+        assertThat(promptCaptor.getValue()).contains(
+                "不要求用户明确说“知识库”或“文档”",
+                "无法确定是否与知识库相关时，优先 needRetrieval=true"
+        );
+    }
+
+    @Test
     void shouldFallbackWhenJsonIsInvalid() {
         when(llmGatewayService.chat(anyString(), anyString())).thenReturn("```json\n{}\n```");
 

@@ -5,6 +5,7 @@ import com.example.smartkb.llm.client.LlmProviderException;
 import com.example.smartkb.llm.client.OpenAiCompatibleClient;
 import com.example.smartkb.llm.config.LlmProperties;
 import com.example.smartkb.llm.exception.AllLlmProviderFailedException;
+import com.example.smartkb.llm.exception.LlmStreamInterruptedException;
 import com.example.smartkb.llm.service.LlmCallLogService;
 import com.example.smartkb.llm.service.LlmGatewayService;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
@@ -18,7 +19,21 @@ import reactor.core.publisher.Flux;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
+/**
+ * LLM 网关实现 —— 统一管理 DeepSeek（主）和 Qwen（备）的调用路由。
+ * <p>
+ * 核心职责：
+ * <ul>
+ *   <li>Chat：优先 DeepSeek，异常或熔断时降级 Qwen</li>
+ *   <li>Stream Chat：流式降级，首 token 后 DeepSeek 中断则视为全局失败</li>
+ *   <li>Embedding：固定 Qwen（DeepSeek 不提供 Embedding）</li>
+ *   <li>熔断：DeepSeek/Qwen 各自独立 CircuitBreaker，开路时跳过</li>
+ *   <li>日志：所有调用异步记录到 {@code kb_llm_call_log}</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class LlmGatewayServiceImpl implements LlmGatewayService {
@@ -76,9 +91,17 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
 
     @Override
     public Flux<String> streamChat(String requestId, String prompt) {
+        return streamChat(requestId, prompt, provider -> { });
+    }
+
+    @Override
+    public Flux<String> streamChat(String requestId, String prompt, Consumer<String> providerCallback) {
         String normalizedRequestId = normalizeRequestId(requestId);
         validateText(prompt, "prompt");
-        AtomicBoolean deepSeekEmitted = new AtomicBoolean(false);
+        // hasEmittedAnyToken：请求级局部状态，每次 streamChat 调用独立，
+        // 用于判断降级时是否已有 token 输出给前端。
+        AtomicBoolean hasEmittedAnyToken = new AtomicBoolean(false);
+        AtomicReference<String> usedProvider = new AtomicReference<>(DEEPSEEK);
         return streamChatProvider(
                 normalizedRequestId,
                 DEEPSEEK,
@@ -86,11 +109,22 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                 deepSeekCircuitBreaker,
                 prompt
         )
-                .doOnNext(token -> deepSeekEmitted.set(true))
-                .onErrorResume(exception -> {
-                    if (deepSeekEmitted.get()) {
-                        return Flux.error(new AllLlmProviderFailedException(exception));
+                .doOnNext(token -> {
+                    if (!hasEmittedAnyToken.getAndSet(true)) {
+                        providerCallback.accept(usedProvider.get());
                     }
+                })
+                .onErrorResume(exception -> {
+                    // case 1: 已有 token 输出 → 禁止切换 Provider，直接报错
+                    if (hasEmittedAnyToken.get()) {
+                        log.warn("DeepSeek stream chat failed after emitting tokens, "
+                                        + "aborting without fallback: requestId={}",
+                                normalizedRequestId);
+                        return Flux.error(new LlmStreamInterruptedException());
+                    }
+                    // case 2: 尚未输出任何 token → 无感知降级到 Qwen
+                    usedProvider.set(QWEN);
+                    providerCallback.accept(QWEN);
                     log.warn("DeepSeek stream chat failed, falling back to Qwen: requestId={}",
                             normalizedRequestId);
                     return streamChatProvider(
@@ -99,7 +133,14 @@ public class LlmGatewayServiceImpl implements LlmGatewayService {
                             properties.getProviders().getQwen(),
                             qwenCircuitBreaker,
                             prompt
-                    ).onErrorMap(AllLlmProviderFailedException::new);
+                    )
+                            .doOnNext(token -> hasEmittedAnyToken.set(true))
+                            .onErrorMap(qwenException -> {
+                                if (hasEmittedAnyToken.get()) {
+                                    return new LlmStreamInterruptedException();
+                                }
+                                return new AllLlmProviderFailedException(qwenException);
+                            });
                 });
     }
 
